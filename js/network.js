@@ -203,7 +203,7 @@ export class NetworkManager {
 
       case 'action':
         // Host processes action and broadcasts result
-        this.callback('action', data);
+        this.callback('action', data.payload || data);
         break;
 
       case 'chat':
@@ -265,7 +265,7 @@ export class NetworkManager {
     }
     const conn = this.connections.get('host');
     if (conn) {
-      conn.send({ type: 'action', ...action });
+      conn.send({ type: 'action', payload: action });
     }
   }
 

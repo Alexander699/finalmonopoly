@@ -36,6 +36,123 @@ let lobbyIsHost = false;
 let lobbyError = '';
 let selectedPropertyForDev = null;
 
+function isOnlineGame() {
+  return !!network && !!localPlayerId;
+}
+
+function isOnlineClient() {
+  return isOnlineGame() && !network.isHost;
+}
+
+function bindEngineListeners() {
+  if (!engine) return;
+
+  engine.on(() => {
+    if (engine.state.lastDice) {
+      diceValues = [engine.state.lastDice.d1, engine.state.lastDice.d2];
+    }
+
+    if (network && network.isHost) {
+      network.broadcastState(engine.serialize());
+    }
+
+    syncDiceAnimationWithTurn();
+    render();
+  });
+
+  engine.onAnimation((type, data) => handleAnimation(type, data));
+}
+
+function applyRemoteState(state) {
+  if (!engine || !state) return;
+  engine.state = state;
+  if (state.lastDice) {
+    diceValues = [state.lastDice.d1, state.lastDice.d2];
+  }
+  syncDiceAnimationWithTurn();
+  render();
+}
+
+function executeGameAction(action) {
+  if (!engine || !action?.kind) return null;
+
+  const currentPlayer = engine.getCurrentPlayer();
+  const actorId = action.playerId || currentPlayer?.id;
+
+  switch (action.kind) {
+    case 'roll-dice':
+      return engine.rollDiceAction();
+    case 'pay-bail': {
+      const player = engine.getPlayerById(actorId);
+      if (!player) return false;
+      engine.payBail(player);
+      return true;
+    }
+    case 'use-immunity': {
+      const player = engine.getPlayerById(actorId);
+      if (!player) return false;
+      player.hasGetOutFree = true;
+      engine.payBail(player);
+      return true;
+    }
+    case 'buy-property':
+      return engine.buyProperty(actorId);
+    case 'decline-purchase':
+      engine.declinePurchase();
+      return true;
+    case 'end-turn':
+      engine.endTurn();
+      return true;
+    case 'influence-action':
+      return engine.useInfluenceAction(actorId, action.actionType, action.targetId);
+    case 'propose-trade':
+      return engine.proposeTrade(actorId, action.partnerId, action.offer || {});
+    case 'accept-trade':
+      return engine.acceptTrade(action.tradeId);
+    case 'reject-trade':
+      return engine.rejectTrade(action.tradeId);
+    case 'develop-property':
+      return engine.developProperty(actorId, action.propertyId);
+    case 'mortgage-property':
+      return engine.mortgageProperty(actorId, action.propertyId);
+    case 'unmortgage-property':
+      return engine.unmortgageProperty(actorId, action.propertyId);
+    case 'sell-development':
+      return engine.sellDevelopment(actorId, action.propertyId);
+    default:
+      console.warn('[NETWORK] Unknown action kind:', action.kind);
+      return null;
+  }
+}
+
+function dispatchGameAction(action) {
+  if (!engine || !action?.kind) return null;
+
+  const payload = {
+    ...action,
+    playerId: action.playerId || localPlayerId || engine.getCurrentPlayer()?.id
+  };
+
+  if (isOnlineClient()) {
+    network.sendAction(payload);
+    return null;
+  }
+
+  return executeGameAction(payload);
+}
+
+function handleRemoteAction(action) {
+  if (!engine || !action?.kind) return;
+
+  // Ignore stale/out-of-turn roll requests.
+  if (action.playerId && action.kind === 'roll-dice' && action.playerId !== engine.getCurrentPlayer()?.id) {
+    console.warn('[NETWORK] Ignored out-of-turn roll action from', action.playerId);
+    return;
+  }
+
+  executeGameAction(action);
+}
+
 // ---- Board Layout Helpers ----
 // Board is 11x11 grid. Spaces go clockwise:
 // Bottom row: 0(BR corner) to 10(BL corner) - left to right visually reversed
@@ -81,7 +198,7 @@ export function initApp() {
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
       const player = engine.getCurrentPlayer();
-      if (player.id === localPlayerId) {
+      if (!localPlayerId || player.id === localPlayerId) {
         if (engine.state.phase === 'pre-roll') handleRollDice();
         else if (engine.state.phase === 'end-turn') handleEndTurn();
       }
@@ -322,16 +439,17 @@ function attachLobbyEvents() {
 }
 
 function startLocalGame(names) {
+  if (network) {
+    network.destroy();
+    network = null;
+  }
+
   sound.init();
   const state = createGameState(names);
   engine = new GameEngine(state);
   localPlayerId = null; // Local mode = all players on same device
 
-  engine.on(() => {
-    syncDiceAnimationWithTurn();
-    render();
-  });
-  engine.onAnimation((type, data) => handleAnimation(type, data));
+  bindEngineListeners();
 
   appScreen = 'game';
   sound.playClick();
@@ -340,6 +458,7 @@ function startLocalGame(names) {
 
 function hostOnlineGame(name) {
   sound.init();
+  if (network) network.destroy();
   network = new NetworkManager();
   lobbyPlayerName = name;
   lobbyIsHost = true;
@@ -362,20 +481,15 @@ function hostOnlineGame(name) {
       case 'game-start':
         engine = new GameEngine(data.state);
         localPlayerId = data.localId;
-        engine.on(() => {
-          syncDiceAnimationWithTurn();
-          render();
-        });
-        engine.onAnimation((type, d) => handleAnimation(type, d));
+        bindEngineListeners();
         appScreen = 'game';
         render();
         break;
+      case 'action':
+        handleRemoteAction(data);
+        break;
       case 'state-update':
-        if (engine) {
-          engine.state = data.state;
-          syncDiceAnimationWithTurn();
-          render();
-        }
+        applyRemoteState(data.state);
         break;
       case 'chat':
         chatMessages.push(data);
@@ -391,6 +505,7 @@ function hostOnlineGame(name) {
 
 function joinOnlineGame(name, code) {
   sound.init();
+  if (network) network.destroy();
   network = new NetworkManager();
   lobbyPlayerName = name;
   lobbyIsHost = false;
@@ -410,20 +525,12 @@ function joinOnlineGame(name, code) {
       case 'game-start':
         engine = new GameEngine(data.state);
         localPlayerId = data.localId;
-        engine.on(() => {
-          syncDiceAnimationWithTurn();
-          render();
-        });
-        engine.onAnimation((type, d) => handleAnimation(type, d));
+        bindEngineListeners();
         appScreen = 'game';
         render();
         break;
       case 'state-update':
-        if (engine) {
-          engine.state = data.state;
-          syncDiceAnimationWithTurn();
-          render();
-        }
+        applyRemoteState(data.state);
         break;
       case 'chat':
         chatMessages.push(data);
@@ -1181,24 +1288,24 @@ function attachGameEvents() {
   // Property management actions
   document.querySelectorAll('[data-develop]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const pid = parseInt(btn.dataset.develop);
-      engine.developProperty(engine.getCurrentPlayer().id, pid);
-      sound.playDevelop();
+      const pid = parseInt(btn.dataset.develop, 10);
+      const success = dispatchGameAction({ kind: 'develop-property', propertyId: pid });
+      if (success) sound.playDevelop();
     });
   });
   document.querySelectorAll('[data-mortgage]').forEach(btn => {
     btn.addEventListener('click', () => {
-      engine.mortgageProperty(engine.getCurrentPlayer().id, parseInt(btn.dataset.mortgage));
+      dispatchGameAction({ kind: 'mortgage-property', propertyId: parseInt(btn.dataset.mortgage, 10) });
     });
   });
   document.querySelectorAll('[data-unmortgage]').forEach(btn => {
     btn.addEventListener('click', () => {
-      engine.unmortgageProperty(engine.getCurrentPlayer().id, parseInt(btn.dataset.unmortgage));
+      dispatchGameAction({ kind: 'unmortgage-property', propertyId: parseInt(btn.dataset.unmortgage, 10) });
     });
   });
   document.querySelectorAll('[data-sell-dev]').forEach(btn => {
     btn.addEventListener('click', () => {
-      engine.sellDevelopment(engine.getCurrentPlayer().id, parseInt(btn.dataset.sellDev));
+      dispatchGameAction({ kind: 'sell-development', propertyId: parseInt(btn.dataset.sellDev, 10) });
     });
   });
 
@@ -1240,10 +1347,10 @@ function attachGameEvents() {
 
   // Accept/reject trades
   document.querySelectorAll('[data-accept-trade]').forEach(btn => {
-    btn.addEventListener('click', () => engine.acceptTrade(btn.dataset.acceptTrade));
+    btn.addEventListener('click', () => dispatchGameAction({ kind: 'accept-trade', tradeId: btn.dataset.acceptTrade }));
   });
   document.querySelectorAll('[data-reject-trade]').forEach(btn => {
-    btn.addEventListener('click', () => engine.rejectTrade(btn.dataset.rejectTrade));
+    btn.addEventListener('click', () => dispatchGameAction({ kind: 'reject-trade', tradeId: btn.dataset.rejectTrade }));
   });
 
   // Chat
@@ -1254,9 +1361,16 @@ function attachGameEvents() {
 
   // New game button
   document.getElementById('btn-new-game')?.addEventListener('click', () => {
+    if (network) {
+      network.destroy();
+      network = null;
+    }
+    localPlayerId = null;
     engine = null;
     appScreen = 'lobby';
     lobbyPlayers = [];
+    lobbyRoomCode = '';
+    lobbyIsHost = false;
     render();
   });
 
@@ -1270,9 +1384,16 @@ function attachGameEvents() {
 
 function attachGameOverEvents() {
   document.getElementById('btn-new-game')?.addEventListener('click', () => {
+    if (network) {
+      network.destroy();
+      network = null;
+    }
+    localPlayerId = null;
     engine = null;
     appScreen = 'lobby';
     lobbyPlayers = [];
+    lobbyRoomCode = '';
+    lobbyIsHost = false;
     render();
   });
 }
@@ -1335,6 +1456,11 @@ function handleRollDice() {
     return;
   }
 
+  if (localPlayerId && currentPlayer?.id !== localPlayerId) {
+    console.warn('[DICE] Blocked - Not your turn');
+    return;
+  }
+
   // Lock dice rolling
   diceAnimationInProgress = true;
   animatingDice = true;
@@ -1376,7 +1502,7 @@ function handleRollDice() {
 
       // Now actually roll in the engine
       try {
-        const result = engine.rollDiceAction();
+        const result = dispatchGameAction({ kind: 'roll-dice' });
         console.log(`[DICE] rollDiceAction result:`, result, `New phase: ${engine.state.phase}`);
 
         if (result) {
@@ -1397,31 +1523,23 @@ function handleRollDice() {
 }
 
 function handlePayBail() {
-  const player = engine.getCurrentPlayer();
-  if (player.hasGetOutFree) {
-    engine.payBail(player);
-  } else {
-    engine.payBail(player);
-  }
+  dispatchGameAction({ kind: 'pay-bail' });
   render();
 }
 
 function handleUseImmunity() {
-  const player = engine.getCurrentPlayer();
-  player.hasGetOutFree = true; // ensure flag is set before calling payBail
-  engine.payBail(player);
+  dispatchGameAction({ kind: 'use-immunity' });
   render();
 }
 
 function handleBuyProperty() {
-  const player = engine.getCurrentPlayer();
-  const success = engine.buyProperty(player.id);
-  if (success) sound.playPurchase();
-  else sound.playError();
+  const success = dispatchGameAction({ kind: 'buy-property' });
+  if (success === true) sound.playPurchase();
+  else if (success === false) sound.playError();
 }
 
 function handleDecline() {
-  engine.declinePurchase();
+  dispatchGameAction({ kind: 'decline-purchase' });
 }
 
 function handleEndTurn() {
@@ -1443,7 +1561,7 @@ function handleEndTurn() {
   stopDiceAnimation();
 
   try {
-    engine.endTurn();
+    dispatchGameAction({ kind: 'end-turn' });
   } catch (error) {
     console.error('[END_TURN] Error:', error);
   }
@@ -1463,17 +1581,20 @@ function handleInfluenceAction(action) {
     // Need to select target - for now pick first opponent
     const others = engine.getActivePlayers().filter(p => p.id !== player.id);
     if (others.length > 0) {
-      engine.useInfluenceAction(player.id, action, others[0].id);
+      dispatchGameAction({ kind: 'influence-action', actionType: action, targetId: others[0].id });
     }
   } else {
-    engine.useInfluenceAction(player.id, action);
+    dispatchGameAction({ kind: 'influence-action', actionType: action });
   }
 }
 
 function handleSendTrade() {
   if (!selectedTradePartner) return;
-  const player = engine.getCurrentPlayer();
-  engine.proposeTrade(player.id, selectedTradePartner, { ...tradeOffer });
+  dispatchGameAction({
+    kind: 'propose-trade',
+    partnerId: selectedTradePartner,
+    offer: { ...tradeOffer }
+  });
   showTradePanel = false;
   tradeOffer = { giveMoney: 0, getMoney: 0, giveProperties: [], getProperties: [] };
   selectedTradePartner = null;
@@ -1508,13 +1629,14 @@ function handleLoadGame() {
   const data = localStorage.getItem('globalEconWars_save');
   if (!data) return false;
   try {
+    if (network) {
+      network.destroy();
+      network = null;
+    }
+    localPlayerId = null;
     const state = JSON.parse(data);
     engine = new GameEngine(state);
-    engine.on(() => {
-      syncDiceAnimationWithTurn();
-      render();
-    });
-    engine.onAnimation((type, data) => handleAnimation(type, data));
+    bindEngineListeners();
     appScreen = 'game';
     render();
     return true;
