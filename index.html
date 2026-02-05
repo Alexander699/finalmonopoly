@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Global Economic Wars - Multiplayer Board Game</title>
+  <meta name="description" content="A multiplayer browser-based board game of global economic strategy">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌍</text></svg>">
+  <link rel="stylesheet" href="css/styles.css">
+  <!-- PeerJS for WebRTC multiplayer -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Loading screen -->
+    <div style="height:100vh;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;">
+      <div style="font-size:64px;animation:pulse 2s ease-in-out infinite">🌍</div>
+      <div style="font-size:24px;font-weight:700;color:#fbbf24;">Global Economic Wars</div>
+      <div style="color:#64748b;font-size:14px;">Loading...</div>
+    </div>
+    <style>
+      @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.15)} }
+    </style>
+  </div>
+
+  <script type="module">
+    import { initApp } from './js/ui.js';
+
+    // Wait for DOM ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initApp);
+    } else {
+      initApp();
+    }
+  </script>
+</body>
+</html>
